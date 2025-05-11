@@ -4,6 +4,8 @@ from copy import deepcopy
 from multiprocessing import Pool
 from typing import Tuple, List, Union, Optional
 
+from skimage.morphology import skeletonize
+
 import numpy as np
 from batchgenerators.utilities.file_and_folder_operations import subfiles, join, save_json, load_json, \
     isfile
@@ -27,13 +29,13 @@ def key_to_label_or_region(key: str):
     except ValueError:
         key = key.replace('(', '')
         key = key.replace(')', '')
-        split = key.split(',')
-        return tuple([int(i) for i in split if len(i) > 0])
+        splitted = key.split(',')
+        return tuple([int(i) for i in splitted])
 
 
 def save_summary_json(results: dict, output_file: str):
     """
-    json does not support tuples as keys (why does it have to be so shitty) so we need to convert that shit
+    stupid json does not support tuples as keys (why does it have to be so shitty) so we need to convert that shit
     ourselves
     """
     results_converted = deepcopy(results)
@@ -85,6 +87,22 @@ def compute_tp_fp_fn_tn(mask_ref: np.ndarray, mask_pred: np.ndarray, ignore_mask
     tn = np.sum(((~mask_ref) & (~mask_pred)) & use_mask)
     return tp, fp, fn, tn
 
+def cl_score(v, s):
+    return np.sum(v*s)/np.sum(s)
+def clDice(mask_pred, mask_ref):
+    tprec=0
+    tsens=0
+    mask_pred=mask_pred[0,...]
+    mask_ref=mask_ref[0,...]
+
+    print(mask_ref.shape)
+    if len(mask_pred.shape)==2:
+        tprec = cl_score(mask_pred,skeletonize(mask_ref))
+        tsens = cl_score(mask_ref,skeletonize(mask_pred))
+    elif len(mask_pred.shape)==3:
+        tprec = cl_score(mask_pred,skeletonize(mask_ref))
+        tsens = cl_score(mask_ref,skeletonize(mask_pred))
+    return 2*tprec*tsens/(tprec+tsens)
 
 def compute_metrics(reference_file: str, prediction_file: str, image_reader_writer: BaseReaderWriter,
                     labels_or_regions: Union[List[int], List[Union[int, Tuple[int, ...]]]],
@@ -92,6 +110,7 @@ def compute_metrics(reference_file: str, prediction_file: str, image_reader_writ
     # load images
     seg_ref, seg_ref_dict = image_reader_writer.read_seg(reference_file)
     seg_pred, seg_pred_dict = image_reader_writer.read_seg(prediction_file)
+    # spacing = seg_ref_dict['spacing']
 
     ignore_mask = seg_ref == ignore_label if ignore_label is not None else None
 
@@ -104,12 +123,15 @@ def compute_metrics(reference_file: str, prediction_file: str, image_reader_writ
         mask_ref = region_or_label_to_mask(seg_ref, r)
         mask_pred = region_or_label_to_mask(seg_pred, r)
         tp, fp, fn, tn = compute_tp_fp_fn_tn(mask_ref, mask_pred, ignore_mask)
+        clDice_metric = clDice(mask_pred, mask_ref)
         if tp + fp + fn == 0:
             results['metrics'][r]['Dice'] = np.nan
             results['metrics'][r]['IoU'] = np.nan
+            results['metrics'][r]['clDice'] = np.nan
         else:
             results['metrics'][r]['Dice'] = 2 * tp / (2 * tp + fp + fn)
             results['metrics'][r]['IoU'] = tp / (tp + fp + fn)
+            results['metrics'][r]['clDice'] = clDice_metric
         results['metrics'][r]['FP'] = fp
         results['metrics'][r]['TP'] = tp
         results['metrics'][r]['FN'] = fn
@@ -135,7 +157,7 @@ def compute_metrics_on_folder(folder_ref: str, folder_pred: str, output_file: st
     files_ref = subfiles(folder_ref, suffix=file_ending, join=False)
     if not chill:
         present = [isfile(join(folder_pred, i)) for i in files_ref]
-        assert all(present), "Not all files in folder_ref exist in folder_pred"
+        assert all(present), "Not all files in folder_pred exist in folder_ref"
     files_ref = [join(folder_ref, i) for i in files_pred]
     files_pred = [join(folder_pred, i) for i in files_pred]
     with multiprocessing.get_context("spawn").Pool(num_processes) as pool:
@@ -226,7 +248,7 @@ def evaluate_folder_entry_point():
                         help='Output file. Optional. Default: pred_folder/summary.json')
     parser.add_argument('-np', type=int, required=False, default=default_num_processes,
                         help=f'number of processes used. Optional. Default: {default_num_processes}')
-    parser.add_argument('--chill', action='store_true', help='dont crash if folder_pred does not have all files that are present in folder_gt')
+    parser.add_argument('--chill', action='store_true', help='dont crash if folder_pred doesnt have all files that are present in folder_gt')
     args = parser.parse_args()
     compute_metrics_on_folder2(args.gt_folder, args.pred_folder, args.djfile, args.pfile, args.o, args.np, chill=args.chill)
 
@@ -244,7 +266,7 @@ def evaluate_simple_entry_point():
                         help='Output file. Optional. Default: pred_folder/summary.json')
     parser.add_argument('-np', type=int, required=False, default=default_num_processes,
                         help=f'number of processes used. Optional. Default: {default_num_processes}')
-    parser.add_argument('--chill', action='store_true', help='dont crash if folder_pred does not have all files that are present in folder_gt')
+    parser.add_argument('--chill', action='store_true', help='dont crash if folder_pred doesnt have all files that are present in folder_gt')
 
     args = parser.parse_args()
     compute_metrics_on_folder_simple(args.gt_folder, args.pred_folder, args.l, args.o, args.np, args.il, chill=args.chill)
